@@ -7,21 +7,69 @@ from __future__ import print_function
 import logging
 import tensorflow as tf
 import numpy as np
+import os
+import h5py
+from scipy.misc import imresize
 
 from glimpse import GlimpseNet, LocNet
 from utils import weight_variable, bias_variable, loglikelihood
 from config import Config
 
-from tensorflow.examples.tutorials.mnist import input_data
+class Data(object):
+  def __init__(self, size, dataroot='/scratch/davidsch/dataprep'):
+    self.files = {'train':os.path.join(dataroot, 'xtcav_autoencoder_dense_prep_train.h5'),
+                  'validation':os.path.join(dataroot, 'xtcav_autoencoder_dense_prep_validation.h5'),
+                  'test':os.path.join(dataroot, 'xtcav_autoencoder_dense_prep_test.h5')}
+    self.imgs = {'train':None,
+                 'validation':None,
+                 'test':None}
+    self.labels = {'train':None,
+                 'validation':None,
+                 'test':None}
+    self.num_examples = {'train':None,
+                 'validation':None,
+                 'test':None}
+
+    for partition, fname in self.files.iteritems():
+      h5 = h5py.File(fname,'r')
+      imgs = h5['imgs'][:]
+      labels = h5['labels'][:]
+      where_zero = labels == 0
+      num_zero = np.sum(where_zero)
+      select_thresh = num_zero / len(labels)
+      select_one = labels == 1 * np.random.rand(len(labels))
+      just_ones = np.logical_and(labels == 1, select_one < select_thresh)
+      to_use = np.logical_or(just_ones, where_zero)
+      num_samples = np.sum(to_use)
+      self.imgs[partition] = np.zeros((num_samples, size * size), dtype=np.float32)
+      imgs = imgs[to_use]
+      labels = labels[to_use]
+      for idx in range(num_samples):
+        reduced_and_square = imresize(np.reshape(imgs[idx],(100,50)),(size,size))
+        self.imgs[partition][idx,:] = reduced_and_square.flatten()[:]
+      self.labels[partition] = labels.astype(np.uint8)
+      self.num_examples[partition]=len(self.imgs[partition])
+    
+  def train_next_batch(self, batchsize):   
+    return self.next_batch('train', batchsize)
+
+  def next_batch(self, partition, batchsize):
+    num_samples = len(self.imgs[partition])
+    batch_samples = np.random.randint(low=0, high=num_samples, size=batchsize)
+    batch_imgs = self.imgs[partition][batch_samples]
+    batch_labels = self.labels[partition][batch_samples]
+    return batch_imgs, batch_labels
+
+#from tensorflow.examples.tutorials.mnist import input_data
 
 logging.getLogger().setLevel(logging.INFO)
 
 rnn_cell = tf.nn.rnn_cell
 seq2seq = tf.nn.seq2seq
 
-mnist = input_data.read_data_sets('MNIST_data', one_hot=False)
 
 config = Config()
+mnist = Data(size=config.original_size) #input_data.read_data_sets('MNIST_data', one_hot=False)
 n_steps = config.step
 
 loc_mean_arr = []
@@ -103,7 +151,7 @@ grads, _ = tf.clip_by_global_norm(grads, config.max_grad_norm)
 # learning rate
 global_step = tf.get_variable(
     'global_step', [], initializer=tf.constant_initializer(0), trainable=False)
-training_steps_per_epoch = mnist.train.num_examples // config.batch_size
+training_steps_per_epoch = mnist.num_examples['train'] // config.batch_size
 starter_learning_rate = config.lr_start
 # decay per training epoch
 learning_rate = tf.train.exponential_decay(
@@ -119,7 +167,8 @@ train_op = opt.apply_gradients(zip(grads, var_list), global_step=global_step)
 with tf.Session() as sess:
   sess.run(tf.initialize_all_variables())
   for i in xrange(n_steps):
-    images, labels = mnist.train.next_batch(config.batch_size)
+    images, labels = mnist.train_next_batch(config.batch_size)
+                                      
     # duplicate M times, see Eqn (2)
     images = np.tile(images, [config.M, 1])
     labels = np.tile(labels, [config.M])
@@ -142,13 +191,13 @@ with tf.Session() as sess:
 
     if i and i % training_steps_per_epoch == 0:
       # Evaluation
-      for dataset in [mnist.validation, mnist.test]:
-        steps_per_epoch = dataset.num_examples // config.eval_batch_size
+      for partition in ['validation', 'test']:
+        steps_per_epoch = mnist.num_examples[partition] // config.eval_batch_size
         correct_cnt = 0
         num_samples = steps_per_epoch * config.batch_size
         loc_net.sampling = True
         for test_step in xrange(steps_per_epoch):
-          images, labels = dataset.next_batch(config.batch_size)
+          images, labels = mnist.next_batch(partition, config.batch_size)
           labels_bak = labels
           # Duplicate M times
           images = np.tile(images, [config.M, 1])
@@ -165,7 +214,7 @@ with tf.Session() as sess:
           pred_labels_val = pred_labels_val.flatten()
           correct_cnt += np.sum(pred_labels_val == labels_bak)
         acc = correct_cnt / num_samples
-        if dataset == mnist.validation:
+        if partition == 'validation':
           logging.info('valid accuracy = {}'.format(acc))
         else:
           logging.info('test accuracy = {}'.format(acc))

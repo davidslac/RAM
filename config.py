@@ -4,7 +4,7 @@ class Config(object):
   batch_size = 32
   eval_batch_size = 50
   loc_std = 0.22
-  original_size = 28
+  original_size = 50 # 28
   num_channels = 1
   depth = 1
   sensor_size = win_size**2 * depth
